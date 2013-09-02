@@ -2,6 +2,7 @@
 require 'rubygems'
 require 'serialport'
 require 'pi_piper'
+require 'httparty'
 
 PiPiper.watch :pin => 17, :invert => true do |pin|
 	port = SerialPort.new '/dev/ttyUSB0', 9600, 8, 1, SerialPort::NONE
