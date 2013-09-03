@@ -4,7 +4,7 @@ require 'serialport'
 require 'pi_piper'
 require 'httparty'
 
-PiPiper.watch :pin => 17, :invert => true do |pin|
+PiPiper.watch :pin => 10, :invert => true do |pin|
 	port = SerialPort.new '/dev/ttyUSB0', 9600, 8, 1, SerialPort::NONE
 	port.write("\x1b\x40") # RESET
 	port.write("\x1b\x21\x10\x1b\x21\x20\x1b\x45\x01\x1b\x61\01") # DOUZBLE WIDTH - DOUBLE HEIGHT - BOLD - CENTER
