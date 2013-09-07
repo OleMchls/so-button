@@ -2,153 +2,238 @@
 require 'rubygems'
 require 'serialport'
 require 'pi_piper'
-require 'httparty'
 require 'chunky_png'
+require "net/http"
+require "uri"
+require "json"
+require "asciify"
 
 # restart me like
 # sudo supervisorctl restart all
 
-def port
-  @port ||= SerialPort.new '/dev/ttyUSB0', 9600, 8, 1, SerialPort::NONE
+class Printer
+  QUOTE_URI = URI.parse('http://printer.socoded.com/')
+  SCHEDULE_URI = URI.parse('http://socoded.com/schedule.json')
+
+  LINE_WIDTH = 42
+  SCHEDULE_UPDATE_INTERVAL = 60
+
+  PRINT_COUNT_FILE = File.expand_path('../printcount', __FILE__)
+
+  def initialize
+    @port = SerialPort.new '/dev/ttyUSB0', 115200, 8, 1, SerialPort::NONE
+    @quotes = []
+
+    @schedule_offset = 0
+    @schedule = []
+    @last_schedule_update = nil
+
+    Thread.abort_on_exception = true
+    getter = Thread.new do
+      while true
+        update_schedule! if schedule_update_due?
+
+        if @quotes.length < 1
+          puts "Fetching in new quote..."
+          new_quote = Net::HTTP.get_response(QUOTE_URI).body.asciify
+
+          puts "New quote is: #{new_quote}"
+          @quotes << new_quote
+        end
+        sleep 0.5
+      end
+    end
+
+    PiPiper.watch :pin => 10, :invert => false do |pin|
+      on_button_press()
+    end
+
+    at_exit do
+      puts "Button printer exiting"
+      @port.close
+      Thread.kill(getter)
+    end
+
+    puts "Button printer ready"
+
+    PiPiper.wait
+  end
+
+  def schedule_update_due?
+    !@last_schedule_update || @last_schedule_update + SCHEDULE_UPDATE_INTERVAL < Time.now.to_i
+  end
+
+  def update_schedule!
+    puts "Updating schedule..."
+    data = JSON.parse(Net::HTTP.get_response(SCHEDULE_URI).body)
+    @schedule_offset = data['offset']
+    @schedule = data['slots']
+    @last_schedule_update = Time.now.to_i
+    puts "Schedule updated"
+  end
+
+  def on_button_press
+    reset
+    high_speed
+    so_coded_logo
+
+    bold
+    center
+    text "\n\nComing up next:\n"
+
+    double_width
+    double_height
+    text next_slot
+
+    normal_text
+    text "\n\nAfter that:\n"
+    double_width
+    double_height
+    text next_slot(1)
+
+    unbold
+    left
+    normal_text
+    text ""
+    line
+    text "Look at this:\n"
+    quote
+    line
+
+    short_line_feed
+    center
+    text "Feedback? @socodedconf on Twitter!"
+    text ""
+    text "<3 Stay So Coded! <3"
+    text ""
+    text "no. #{print_count}"
+
+    line_feed
+    full_cut
+  end
+
+  protected
+  def quote
+    if @quotes.empty?
+      text "STOP PUSHING!!!!!!111 Seriously."
+      return
+    end
+
+    quote_parts = @quotes.shift.split(" ")
+    quote_lines = [[]]
+    while !quote_parts.empty?
+      new_part = quote_parts.shift
+
+      if (quote_lines.last + [new_part]).join(" ").length > LINE_WIDTH
+        quote_lines << []
+      end
+
+      quote_lines.last << new_part
+    end
+
+    message = (quote_lines.map {|a| a.join(' ')}).join("\n")
+    puts message
+    text message
+  end
+
+  def text(string)
+    _raw "#{string}\n"
+  end
+
+  def reset
+    _raw "\x1b\x40"
+  end
+
+  def normal_text
+    _raw "\x1b\x21\x00"
+  end
+
+  def double_width
+    _raw "\x1b\x21\x10"
+  end
+
+  def double_height
+    _raw "\x1b\x21\x20"
+  end
+
+  def unbold
+    _raw "\x1b\x45\x00"
+  end
+
+  def bold
+    _raw "\x1b\x45\x01"
+  end
+
+  def left
+    _raw "\x1b\x61\x00"
+  end
+
+  def center
+    _raw "\x1b\x61\01"
+  end
+
+  def full_cut
+    _raw "\x1d\x56\x00"
+  end
+
+  def short_line_feed
+    _raw "\n\n"
+  end
+
+  def line_feed
+    _raw "\n\n\n\n\n\n\n\n"
+  end
+
+  def high_speed
+    _raw "\x1Cs\x02"
+  end
+
+  def underline
+    _raw "\x1b\x2d\x02"
+  end
+
+  def ununderline
+    _raw "\x1b\x2d\x00"
+  end
+
+  def so_coded_logo
+    _raw File.binread('star.raw')
+  end
+
+  def next_slot(offset = 0)
+    time = Time.now.to_i - (@schedule_offset * 60)
+    i = 0
+    while @schedule[i]['time'] < time
+      i += 1
+    end
+
+    i += offset
+
+    return "FIN" if i > @schedule.length - 1
+
+    @schedule[i]['speaker']
+  end
+
+  def line
+    underline
+    text " " * LINE_WIDTH
+    ununderline
+  end
+
+  def print_count
+    write_count(0) unless File.exist?(PRINT_COUNT_FILE)
+    count = File.read(PRINT_COUNT_FILE).to_i
+    write_count(count + 1)
+  end
+
+  def write_count(count)
+    File.open(PRINT_COUNT_FILE, 'w') {|f| f.print count.to_s}
+    count
+  end
+
+  def _raw(message)
+    @port.write(message)
+  end
 end
 
-# PiPiper.watch :pin => 10, :invert => false do |pin|
-# #p 'push'
-#   port.write("\x1b\x40") # RESET
-#   port.write("\x1b\x21\x10\x1b\x21\x20\x1b\x45\x01\x1b\x61\01") # DOUZBLE WIDTH - DOUBLE HEIGHT - BOLD - CENTER
-#   port.write(HTTParty.get('http://so-statements.herokuapp.com/').body) # TEXT
-#   port.write("\n\n\n\n\n\n\n\n") # LINEFEED
-#   port.write("\x1d\x56\x00") # FULLCUT
-# end
-#
-# PiPiper.wait
-#
-at_exit do
-  port.close
-end
-
-port.write("\x1b\x40") # RESET
-port.write(File.binread('star.raw'))
-port.write("YAY")
-port.write("\n\n\n\n\n\n\n\n") # LINEFEED
-port.write("\x1d\x56\x00") # FULLCUT
-
-# # Image format
-# S_RASTER_N      = "\x1d\x76\x30\x00" # Set raster image normal size
-# S_RASTER_2W     = "\x1d\x76\x30\x01" # Set raster image double width
-# S_RASTER_2H     = "\x1d\x76\x30\x02" # Set raster image double height
-# S_RASTER_Q      = "\x1d\x76\x30\x03" # Set raster image quadruple
-#
-# def decode_hex(buffer)
-#   buffer.scan(/../).map(&:hex).map(&:chr).join
-# end
-#
-# def print_image(line, size)
-#   # Print formatted image
-#   i = 0
-#   cont = 0
-#   buffer = ""
-#
-#   port.write(S_RASTER_N)
-#   buffer = "%02X%02X%02X%02X" % [((size[0] / size[1]) / 8), 0, size[1], 0]
-#   port.write(decode_hex(buffer))
-#   buffer = ""
-#
-#   while i < line.length do
-#     hex_string = line[i..i+8].to_i(2)
-#     #hex_string = line[i..i+8].to_s(2)
-#
-#     buffer += "%02X" % hex_string
-#     i += 8
-#     cont += 1
-#     if cont % 4 == 0
-#       port.write(decode_hex(buffer))
-#       buffer = ""
-#       cont = 0
-#     end
-#   end
-# end
-#
-#
-# def check_image_size(size)
-#   # Check and fix the size of the image to 32 bits
-#   if size % 32 == 0
-#     return (0..0)
-#   else
-#     image_border = 32 - (size % 32)
-#     if image_border % 2 == 0
-#       return [image_border / 2, image_border / 2]
-#     else
-#       return [image_border / 2, (image_border / 2) + 1]
-#     end
-#   end
-# end
-#
-# def convert_image(im)
-#   # Parse image and prepare it to a printable format
-#   pixels   = []
-#   pix_line = ""
-#   im_left  = ""
-#   im_right = ""
-#   switch   = 0
-#   img_size = [0, 0]
-#
-#   if im.width > 512
-#     puts "WARNING: Image is wider than 512 and could be truncated at print time"
-#   end
-#
-#   if im.height > 255
-#     raise "Image height too big"
-#   end
-#
-#   im_border = check_image_size(im.width)
-#
-#   (0..im_border[0]).each do
-#     im_left += "0"
-#   end
-#
-#   (0..im_border[1]).each do
-#     im_right += "0"
-#   end
-#
-#   (0...im.height).each do |y|
-#     img_size[1] += 1
-#     pix_line += im_left
-#     img_size[0] += im_border[0]
-#
-#     (0...im.width).each do |x|
-#       img_size[0] += 1
-#       color = im.get_pixel(x, y)
-#
-#       rgb = [ChunkyPNG::Color.r(color), ChunkyPNG::Color.g(color), ChunkyPNG::Color.b(color)]
-#       im_color = rgb[0] + rgb[1] + rgb[2]
-#       im_pattern = "1X0"
-#       pattern_len = im_pattern.length
-#       switch = (switch - 1 ) * (-1)
-#       (0..pattern_len).each do |xx|
-#         if im_color <= (255 * 3 / pattern_len * (xx+1))
-#           if im_pattern[xx] == "X"
-#             pix_line += "%d" % switch
-#           else
-#             pix_line += im_pattern[xx]
-#             break
-#           end
-#         elsif im_color > (255 * 3 / pattern_len * pattern_len) && im_color <= (255 * 3)
-#           pix_line += im_pattern[-1]
-#           break
-#         end
-#       end
-#     end
-#     pix_line += im_right
-#     img_size[0] += im_border[1]
-#   end
-#
-#   print_image(pix_line, img_size)
-# end
-#
-# def image(path)
-#   image = ChunkyPNG::Image.from_file(path)
-#   convert_image(image)
-# end
-#
-# image(File.expand_path('../logo.png', __FILE__))
+printer = Printer.new
