@@ -197,7 +197,7 @@ class Printer
   end
 
   def so_coded_logo
-    _raw File.binread('star.raw')
+    _raw File.binread(File.expand_path('../star.raw', __FILE__))
   end
 
   def next_slot(offset = 0)
